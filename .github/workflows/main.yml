@@ -12,7 +12,6 @@ on:
 
 jobs:
   build:
-    # ubuntu-latest = GRATUITO (macos cobra 10x mais e bloqueou sua conta)
     runs-on: ubuntu-latest
 
     steps:
@@ -26,23 +25,43 @@ jobs:
             libxml2-dev libssl-dev zlib1g-dev python3-pip curl unzip file
           pip3 install lief
 
-      - name: Baixar iPhoneOS SDK (theos/sdks - publico e gratuito)
+      - name: Baixar iPhoneOS SDK
         run: |
           mkdir -p $HOME/iossdk
-          curl -L \
-            "https://github.com/theos/sdks/releases/download/2024-02-29/iPhoneOS16.2.sdk.tar.xz" \
-            -o /tmp/iPhoneOS.sdk.tar.xz
+
+          # Tenta varios mirrors do SDK ate um funcionar
+          URLS=(
+            "https://github.com/xybp888/iOS-SDKs/releases/download/iOS16.2-SDK/iPhoneOS16.2.sdk.tar.xz"
+            "https://github.com/theos/sdks/releases/download/2024-02-29/iPhoneOS16.2.sdk.tar.xz"
+            "https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/iPhoneOS14.5.sdk.tar.xz"
+          )
+
+          for URL in "${URLS[@]}"; do
+            echo "Tentando: $URL"
+            curl -L --retry 3 --max-time 120 "$URL" -o /tmp/iPhoneOS.sdk.tar.xz
+            SIZE=$(wc -c < /tmp/iPhoneOS.sdk.tar.xz)
+            echo "Baixado: $SIZE bytes"
+            if [ "$SIZE" -gt 1000000 ]; then
+              echo "SDK valido encontrado!"
+              break
+            fi
+            echo "Falhou, tentando proximo..."
+          done
+
           tar -xf /tmp/iPhoneOS.sdk.tar.xz -C $HOME/iossdk
-          echo "IPHONE_SDK=$HOME/iossdk/iPhoneOS16.2.sdk" >> $GITHUB_ENV
-          ls $HOME/iossdk/
+          SDK_DIR=$(ls $HOME/iossdk/ | head -1)
+          echo "IPHONE_SDK=$HOME/iossdk/$SDK_DIR" >> $GITHUB_ENV
+          echo "SDK: $SDK_DIR"
 
       - name: Baixar GTA SA IPA
         run: |
           mkdir -p ipa_input
-          curl -L "${{ github.event.inputs.gtasa_ipa_url }}" \
+          curl -L --retry 3 \
+            "${{ github.event.inputs.gtasa_ipa_url }}" \
             -o ipa_input/gtasa_original.ipa
           TIPO=$(file ipa_input/gtasa_original.ipa)
           echo "Tipo: $TIPO"
+          echo "Tamanho: $(du -sh ipa_input/gtasa_original.ipa | cut -f1)"
           if ! echo "$TIPO" | grep -qiE "zip|archive"; then
             echo "ERRO: nao e um IPA valido!"
             head -c 500 ipa_input/gtasa_original.ipa
@@ -73,6 +92,9 @@ jobs:
           mkdir -p build
           CLANG="clang++"
           SDK="${{ env.IPHONE_SDK }}"
+          JOBS=$(nproc)
+          echo "Compilando com $JOBS nucleos"
+
           CFLAGS=(
             -target arm64-apple-ios12.0 -isysroot "$SDK"
             -O2 -fvisibility=hidden -fno-objc-arc -std=c++17
@@ -85,19 +107,26 @@ jobs:
             -dynamiclib -target arm64-apple-ios12.0 -isysroot "$SDK"
             -install_name @executable_path/Frameworks/libSAMP.dylib -lc++
           )
+
           OBJECTS=()
+          PIDS=()
+
           for cpp in src/*.cpp; do
             obj="build/$(basename ${cpp%.cpp}).o"
-            echo "[CC] $cpp"
-            "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj"
+            "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj" &
+            PIDS+=($!)
             OBJECTS+=("$obj")
           done
+
           for cpp in raknet/*.cpp raknet/SAMP/*.cpp; do
             obj="build/raknet_$(basename ${cpp%.cpp}).o"
-            echo "[CC] $cpp"
-            "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj"
+            "$CLANG" "${CFLAGS[@]}" -c "$cpp" -o "$obj" &
+            PIDS+=($!)
             OBJECTS+=("$obj")
           done
+
+          for pid in "${PIDS[@]}"; do wait $pid || exit 1; done
+
           echo "[LD] Linkando..."
           "$CLANG" "${LDFLAGS[@]}" "${OBJECTS[@]}" -o build/libSAMP.dylib
           file build/libSAMP.dylib
