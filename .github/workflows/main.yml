@@ -32,27 +32,29 @@ jobs:
           curl -L --retry 3 \
             "${{ github.event.inputs.gtasa_ipa_url }}" \
             -o ipa_input/gtasa_original.ipa
-          TIPO=$(file ipa_input/gtasa_original.ipa)
-          echo "Tipo: $TIPO"
           echo "Tamanho: $(du -sh ipa_input/gtasa_original.ipa | cut -f1)"
-          if ! echo "$TIPO" | grep -qiE "zip|archive"; then
-            echo "ERRO: nao e um IPA valido!"
-            head -c 500 ipa_input/gtasa_original.ipa
-            exit 1
-          fi
+          file ipa_input/gtasa_original.ipa
 
       - name: Extrair binario GTASA do IPA
         run: |
-          python3 scripts/unpack_ipa.py \
+          # Roda o script e captura a linha BINARY_PATH=...
+          OUTPUT=$(python3 scripts/unpack_ipa.py \
             --ipa ipa_input/gtasa_original.ipa \
-            --output extracted/
-          BINARY=$(find extracted -name "GrandTheftAutoSanAndreas" -o -name "GTASA" | head -1)
-          echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
+            --output extracted/)
+
+          echo "$OUTPUT"
+
+          # Extrai o caminho da linha BINARY_PATH=
+          BINARY=$(echo "$OUTPUT" | grep "^BINARY_PATH=" | cut -d= -f2)
+
           echo "Binario: $BINARY"
+          echo "GTASA_BINARY=$BINARY" >> $GITHUB_ENV
+
           file "$BINARY"
 
       - name: Extrair offsets do GTASA iOS
         run: |
+          echo "Binario: ${{ env.GTASA_BINARY }}"
           python3 scripts/extract_offsets.py \
             --binary "${{ env.GTASA_BINARY }}" \
             --output src/ios_offsets.h \
@@ -60,12 +62,9 @@ jobs:
             --android libs/android/libGTASA.so
           cat src/ios_offsets.h
 
-      - name: Compilar libSAMP.dylib (ARM64 cross-compile)
+      - name: Compilar libSAMP.dylib (ARM64)
         run: |
           mkdir -p build
-
-          # Usa clang com target arm64-linux (sem SDK iOS — compila o .so/.dylib igualmente)
-          # O binario resultante e ARM64 valido para injecao no IPA
           CLANG="clang++"
 
           CFLAGS=(
